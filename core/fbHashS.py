@@ -1,0 +1,2 @@
+def fbhashS():
+    return 'fbhashS'
