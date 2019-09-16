@@ -1,5 +1,7 @@
 # repo specific
 data/
+results/
+plot_document_clustering.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

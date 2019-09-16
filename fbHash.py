@@ -1,50 +1,28 @@
-import pprint
+import glob
+import os
+from pprint import pprint
 from random import randrange
+from time import time
 
-def chunker(bytestream, n=7):
-    for i in range(n, len(bytestream)+1):
-        yield bytestream[i-n:i]
-
-
-def fbhashB():
-    f1 = []
-    f2 = []
-    with open('fbHash/data/test1.txt','rb') as f:
-        raw = f.read()
-        rh = RollingHash(raw,7)
-        for i,_ in enumerate(range(7, len(raw) + 1),start=1):
-            f1.append({
-                'i':i,
-                'hash':rh.digest(),
-                'text':rh.text(),
-            })
-            rh.update()
-    with open('fbHash/data/test2.txt','rb') as f:
-        raw = f.read()
-        rh = RollingHash(raw,7)
-        for i,_ in enumerate(range(7, len(raw) + 1),start=1):
-            f2.append({
-                'i':i,
-                'hash':rh.digest(),
-                'text':rh.text(),
-            })
-            rh.update()
-
-    mismatched = 0
-    all_hashes = set()
-
-    for yin, yang in zip(f1,f2):
-        if yin['hash'] != yang['hash']:
-            all_hashes.add(yin['hash'])
-            all_hashes.add(yang['hash'])
-            print(yin['text'], yang['text'])
-            mismatched += 1
-
-    percent_matched = 1 - (mismatched/len(f1))
-    print(f"f1 and f2 were {percent_matched:.2%}% similar")
-    print(sorted(all_hashes))
+import numpy as np
+import pandas as pd
+from sklearn import cluster, metrics
+from sklearn.feature_extraction.text import (CountVectorizer,
+                                             HashingVectorizer,
+                                             TfidfTransformer, 
+                                             TfidfVectorizer)
+from sklearn.metrics.pairwise import cosine_similarity
 
 
+def yield_filepaths(parent_dir, extension='txt'):
+    for fpath in glob.glob(f"**/*.{extension}",recursive=True):
+        with open(fpath, 'rb') as f:
+            yield f.read()
+
+def yield_bytes(fpaths):
+    for fpath in fpaths:
+        with open(fpath,'rb') as f:
+            yield f.read()
 class RollingHash:
     known_64_bit_primes = [
             17586613600806056593,
@@ -101,6 +79,93 @@ class RollingHash:
         return self.known_64_bit_primes[idx]
 
 
+class CustomVectorizer(CountVectorizer):
+    def build_analyzer(self):
+
+        def analyser(doc, k=7, a=26, mod=None):
+            rh = RollingHash(doc, k=k, a=a, mod=mod)
+            tokens = []
+            for _ in range(7, len(doc) + 1):
+                tokens.append(rh.digest())
+                rh.update()
+            return(tokens)
+    
+        return(analyser)
+
+def extract_ext(fpath):
+    _, fext = os.path.splitext(fpath)
+    return fext
+
+def save_csv(outpath, arr, index_list=None, col_list=None):
+    df = pd.DataFrame(arr)
+    if index_list is not None:
+        df.index = index_list
+    if col_list is not None:
+        df.columns = col_list
+    df.to_csv(outpath)
+
 if __name__ == "__main__":
-    # print(large_primes())
-    fbhashB()
+    t0 = time()
+    fpaths = []
+    fpaths.extend(glob.glob(f"**/*.txt",recursive=True))
+    fpaths.extend(glob.glob(f"**/*.xlsx",recursive=True))
+    fpaths.extend(glob.glob(f"**/*.py",recursive=True))
+    # fpaths.extend(glob.glob("path/to/folder/*.*",recursive=True))
+    # fpaths.sort()
+    vectorizer = CustomVectorizer()
+    X = vectorizer.fit_transform(yield_bytes(fpaths))
+    print("vectorized in %fs" % (time() - t0))
+    sims_basic = cosine_similarity(X)
+    print()
+    # print("Basic")
+    # print(sims_basic)
+    print()
+    transformer = TfidfTransformer()
+    tfidf = transformer.fit_transform(X)
+    print("transformed in %fs" % (time() - t0))
+    sims_tfidf = cosine_similarity(tfidf)
+    # print("Tf-Idf")
+    # print(sims_tfidf)
+    print("cosined in %fs" % (time() - t0))
+
+    for i,j in np.argwhere(sims_tfidf>0.65):
+        if i >= j:
+            continue
+        print(f"{fpaths[i]} matched with {fpaths[j]} at {sims_tfidf[i][j]:.3%}%")
+
+    labels = [extract_ext(f) for f in fpaths]
+    label_map = list(set(labels))
+
+    # for f,l in zip(fpaths, labels):
+    #     print(f"For {f} got {l}")
+
+    km = cluster.AgglomerativeClustering(n_clusters = len(set(labels)))
+    km = cluster.AffinityPropagation()
+    km.fit(tfidf.toarray())
+    print("clustered in %fs" % (time() - t0))
+
+    print(km.__dict__)
+
+    print("Homogeneity: %0.3f" % metrics.homogeneity_score(labels, km.labels_))
+    print("Completeness: %0.3f" % metrics.completeness_score(labels, km.labels_))
+    print("V-measure: %0.3f" % metrics.v_measure_score(labels, km.labels_))
+    print("Adjusted Rand-Index: %.3f"
+        % metrics.adjusted_rand_score(labels, km.labels_))
+    print("Silhouette Coefficient: %0.3f"
+        % metrics.silhouette_score(X, km.labels_, sample_size=1000))
+
+    for i in range(len(fpaths)):
+        print("{:>45} {:>5} {}".format(
+            fpaths[i],
+            labels[i],
+            km.labels_[i])
+        )
+
+    save_csv(
+        outpath='fbHash/results/labeled_df.csv', 
+        arr=tfidf.toarray(), 
+        index_list = fpaths)
+    save_csv(
+        outpath='fbHash/results/tf_idf_similarity.csv', 
+        arr=sims_tfidf
+        )
